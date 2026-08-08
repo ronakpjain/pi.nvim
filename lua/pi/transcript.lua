@@ -200,7 +200,10 @@ function M.open()
   local origin_window = vim.api.nvim_get_current_win()
   vim.cmd("botright vsplit")
   state.winnr = vim.api.nvim_get_current_win()
-  state.bufnr = vim.api.nvim_create_buf(false, true)
+  if not valid_buffer() then
+    state.bufnr = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_name(state.bufnr, "pi://transcript")
+  end
   vim.api.nvim_win_set_buf(state.winnr, state.bufnr)
   vim.api.nvim_win_set_width(state.winnr, math.min(88, math.max(48, math.floor(vim.o.columns * 0.38))))
 
@@ -216,8 +219,6 @@ function M.open()
   vim.wo[state.winnr].wrap = true
   vim.wo[state.winnr].linebreak = true
   vim.wo[state.winnr].winfixwidth = true
-  vim.api.nvim_buf_set_name(state.bufnr, "pi://transcript")
-
   M.clear()
   if vim.api.nvim_win_is_valid(origin_window) then
     vim.api.nvim_set_current_win(origin_window)
