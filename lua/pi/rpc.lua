@@ -112,6 +112,12 @@ local function fail_process(message)
 end
 
 local function on_exit(result)
+  if client.stdout_buffer ~= "" then
+    local final_line = client.stdout_buffer
+    client.stdout_buffer = ""
+    handle_line(final_line)
+  end
+
   local process = client.process
   client.process = nil
   client.state = nil
