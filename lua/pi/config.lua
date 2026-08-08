@@ -8,6 +8,7 @@ local VALID_THINKING_LEVELS = {
   medium = true,
   high = true,
   xhigh = true,
+  max = true,
 }
 
 M.defaults = {
@@ -103,7 +104,7 @@ function M.validate(opts)
       error("pi.nvim: thinking must be a string")
     end
     if not VALID_THINKING_LEVELS[opts.thinking] then
-      error("pi.nvim: thinking must be one of: off, minimal, low, medium, high, xhigh")
+      error("pi.nvim: thinking must be one of: off, minimal, low, medium, high, xhigh, max")
     end
   end
   if opts.system_prompt ~= nil and type(opts.system_prompt) ~= "string" then

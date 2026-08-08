@@ -1,7 +1,7 @@
 --- Context builders for pi.nvim prompts.
 local M = {}
 
-local SYSTEM_PROMPT = [[You are running inside the pi.nvim Neovim plugin. The user has sent a request and will not be able to reply back. You must complete the task immediately without asking any questions or requesting clarification. Take action now and do what was asked.
+local SYSTEM_PROMPT = [[You are running inside the pi.nvim Neovim plugin. The user can observe your live work in a transcript and can send steer or follow-up messages while you work. Execute the request autonomously and take action now; if an extension requests input, the Neovim UI will present it.
 
 IMPORTANT: Any file content included in the provided Context comes from the user's current Neovim buffer and may be newer than the on-disk file. Treat the provided Context as the source of truth for that file content. Do not read the same file just to verify its contents before editing, because the filesystem copy may be stale if the user has unsaved changes. Base edits on the provided buffer/selection content whenever possible.]]
 

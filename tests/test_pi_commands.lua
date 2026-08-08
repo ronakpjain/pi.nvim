@@ -3,7 +3,26 @@ local MiniTest = require("mini.test")
 local child = MiniTest.new_child_neovim()
 
 local function flush()
-  child.lua([[vim.wait(50, function() return false end, 10)]])
+  child.lua([[
+    local request = _G.__pi_test_system and _G.__pi_test_system.pending_state
+    if request and _G.__pi_test_system.opts and _G.__pi_test_system.opts.stdout then
+      _G.__pi_test_system.pending_state = nil
+      _G.__pi_test_system.opts.stdout(nil, vim.json.encode({
+        type = "response",
+        id = request.id,
+        command = request.type,
+        success = true,
+        data = {
+          model = { provider = "test", id = "test-model" },
+          thinkingLevel = "off",
+          isStreaming = false,
+          sessionFile = _G.__pi_test_system.session_file,
+          sessionId = "test-session",
+        },
+      }) .. "\n")
+    end
+  ]])
+  child.lua([[vim.wait(250)]])
 end
 
 local function setup_test_env(setup_code)
@@ -11,6 +30,12 @@ local function setup_test_env(setup_code)
   child.lua([[
     _G.__pi_test_notifications = {}
     _G.__pi_force_notify_backend = true
+    vim.schedule = function(fn, ...)
+      fn(...)
+    end
+    vim.schedule_wrap = function(fn)
+      return fn
+    end
     vim.notify = function(msg, level)
       table.insert(_G.__pi_test_notifications, { msg = msg, level = level })
     end
@@ -58,12 +83,26 @@ local function mock_system()
       closing = false,
       writes = {},
       stdin_closed = false,
+      session_number = 0,
+      session_file = "/test/session-1.jsonl",
     }
 
     vim.system = function(cmd, opts, on_exit)
       _G.__pi_test_system.cmd = cmd
       _G.__pi_test_system.opts = opts
       _G.__pi_test_system.on_exit = on_exit
+      local function respond(request, data, success, error)
+        if _G.__pi_test_system.opts and _G.__pi_test_system.opts.stdout then
+          _G.__pi_test_system.opts.stdout(nil, vim.json.encode({
+            type = "response",
+            id = request.id,
+            command = request.type,
+            success = success ~= false,
+            data = data,
+            error = error,
+          }) .. "\n")
+        end
+      end
       return {
         write = function(_, data)
           if data == nil then
@@ -71,6 +110,28 @@ local function mock_system()
             _G.__pi_test_system.closing = true
           else
             table.insert(_G.__pi_test_system.writes, data)
+            local ok, request = pcall(vim.json.decode, vim.trim(data))
+            if ok and request and request.type == "get_state" then
+              _G.__pi_test_system.pending_state = request
+            elseif ok and request and request.type == "new_session" then
+              _G.__pi_test_system.session_number = _G.__pi_test_system.session_number + 1
+              _G.__pi_test_system.session_file = "/test/session-" .. tostring(_G.__pi_test_system.session_number + 1) .. ".jsonl"
+              respond(request, { cancelled = false })
+            elseif ok and request and request.type == "get_entries" then
+              respond(request, { entries = {}, leafId = vim.NIL })
+            elseif ok and request and request.type == "set_model" then
+              respond(request, { provider = request.provider, id = request.modelId })
+            elseif ok and request and request.type == "set_thinking_level" then
+              respond(request, {})
+            elseif ok and request and request.type == "cycle_thinking_level" then
+              respond(request, { level = "low" })
+            elseif ok and request and request.type == "cycle_model" then
+              respond(request, { model = { provider = "test", id = "next-model" }, thinkingLevel = "off" })
+            elseif ok and request and request.type == "get_session_stats" then
+              respond(request, { sessionId = "test-session", cost = 0, contextUsage = { percent = 1 } })
+            elseif ok and request and request.type == "abort" then
+              respond(request, {})
+            end
           end
         end,
         kill = function(_, signal)
@@ -148,7 +209,13 @@ local function decode_prompt(stdin)
   return child.lua(
     [[
       local stdin = ...
-      return vim.json.decode(vim.trim(stdin))
+      for line in stdin:gmatch("[^\n]+") do
+        local ok, value = pcall(vim.json.decode, line)
+        if ok and value.type == "prompt" then
+          return value
+        end
+      end
+      return nil
     ]],
     { stdin }
   )
@@ -193,7 +260,7 @@ local function test_pi_ask_uses_vim_system_command()
   MiniTest.expect.equality(cmd[1], "pi")
   MiniTest.expect.equality(cmd[2], "--mode")
   MiniTest.expect.equality(cmd[3], "rpc")
-  MiniTest.expect.equality(cmd[4], "--no-session")
+  MiniTest.expect.equality(has_arg(cmd, "--no-session"), nil)
   MiniTest.expect.equality(stdin_mode, true)
 
   local append_idx = has_arg(cmd, "--append-system-prompt")
@@ -362,8 +429,9 @@ local function test_chunked_stdout_updates_and_success_notifies_done()
   MiniTest.expect.equality(active_tool, "read_file")
 
   system.stdout('{"type":"agent_end"}\n')
-  MiniTest.expect.equality(system.stdin_was_closed(), true)
-  system.exit(0, 0)
+  MiniTest.expect.equality(child.lua_get([[require("pi").is_running()]]), true)
+  system.stdout('{"type":"agent_settled"}\n')
+  MiniTest.expect.equality(system.stdin_was_closed(), false)
 
   MiniTest.expect.equality(child.lua_get([[require("pi").is_running()]]), false)
   MiniTest.expect.equality(child.lua_get([[require("pi")._get_last_session().bufnr == nil]]), true)
@@ -375,7 +443,7 @@ local function test_error_notifies_and_clears_ui_state()
 
   local system = run_pi_ask("break")
   system.stdout('{"type":"response","success":false,"error":"boom"}\n')
-  MiniTest.expect.equality(system.stdin_was_closed(), true)
+  MiniTest.expect.equality(system.stdin_was_closed(), false)
   system.exit(1, 0)
 
   MiniTest.expect.equality(child.lua_get([[require("pi").is_running()]]), false)
@@ -397,42 +465,34 @@ local function test_clean_exit_without_agent_end_is_an_error()
 end
 
 local function test_turn_end_does_not_finish_session()
-  -- Regression: turn_end means one agent turn finished, not the whole run.
-  -- During multi-step tool workflows, the agent emits turn_end between turns
-  -- and only emits agent_end when the entire run is complete. See PR #4.
+  -- A low-level agent_end can be followed by retry/compaction. Only
+  -- agent_settled releases the session lock.
   setup_test_env()
   setup_buffer({ "code" }, "/test/file.lua")
 
   local system = run_pi_ask("multi-turn")
-
-  -- Simulate: tool call -> turn_end with stopReason="toolUse" -> another turn
   system.stdout('{"type":"tool_execution_start","toolName":"edit"}\n')
   system.stdout('{"type":"tool_execution_end","toolName":"edit"}\n')
   system.stdout('{"type":"turn_end","stopReason":"toolUse"}\n')
-
-  -- Session must still be running; stdin must not be closed.
   MiniTest.expect.equality(child.lua_get([[require("pi").is_running()]]), true)
   MiniTest.expect.equality(system.stdin_was_closed(), false)
 
-  -- Now the actual terminal event arrives.
   system.stdout('{"type":"agent_end"}\n')
-  MiniTest.expect.equality(system.stdin_was_closed(), true)
-  system.exit(0, 0)
+  MiniTest.expect.equality(child.lua_get([[require("pi").is_running()]]), true)
+  system.stdout('{"type":"agent_settled"}\n')
+  MiniTest.expect.equality(system.stdin_was_closed(), false)
 
   MiniTest.expect.equality(child.lua_get([[require("pi").is_running()]]), false)
   MiniTest.expect.equality(child.lua_get([[require("pi")._get_last_session().status]]), "done")
 end
 
 local function test_turn_end_followed_by_agent_end_completes()
-  -- Single-turn runs emit turn_end immediately followed by agent_end.
-  -- Ensure that pattern still completes cleanly.
   setup_test_env()
   setup_buffer({ "code" }, "/test/file.lua")
 
   local system = run_pi_ask("single turn")
-  system.stdout('{"type":"turn_end","stopReason":"endTurn"}\n{"type":"agent_end"}\n')
-  MiniTest.expect.equality(system.stdin_was_closed(), true)
-  system.exit(0, 0)
+  system.stdout('{"type":"turn_end","stopReason":"endTurn"}\n{"type":"agent_end"}\n{"type":"agent_settled"}\n')
+  MiniTest.expect.equality(system.stdin_was_closed(), false)
 
   MiniTest.expect.equality(child.lua_get([[require("pi").is_running()]]), false)
   MiniTest.expect.equality(child.lua_get([[require("pi")._get_last_session().status]]), "done")
@@ -446,9 +506,59 @@ local function test_cancel_kills_process_and_closes_immediately()
   child.cmd("PiCancel")
   flush()
 
-  MiniTest.expect.equality(system.killed(), 15)
+  MiniTest.expect.equality(child.lua_get([[_G.__pi_test_system.killed == nil]]), true)
+  MiniTest.expect.equality(child.lua_get([[require("pi").is_running()]]), true)
+  system.stdout('{"type":"agent_settled"}\n')
   MiniTest.expect.equality(child.lua_get([[require("pi").is_running()]]), false)
-  MiniTest.expect.equality(child.lua_get([[require("pi")._get_last_session().bufnr == nil]]), true)
+  MiniTest.expect.equality(child.lua_get([[require("pi")._get_last_session().status]]), "cancelled")
+end
+
+local function test_pi_ask_starts_a_new_session_after_settlement()
+  setup_test_env()
+  setup_buffer({ "code" }, "/test/file.lua")
+
+  local system = run_pi_ask("first")
+  system.stdout('{"type":"agent_settled"}\n')
+  local before = child.lua_get([[require("pi.rpc").get_state().sessionFile]])
+
+  child.lua([[vim.ui.input = function(_, callback) callback("second") end]])
+  child.cmd("PiAsk")
+  flush()
+
+  local after = child.lua_get([[require("pi.rpc").get_state().sessionFile]])
+  local requests = child.lua_get([[
+    (function()
+      local result = {}
+      for line in table.concat(_G.__pi_test_system.writes, ""):gmatch("[^\n]+") do
+        local ok, value = pcall(vim.json.decode, line)
+        if ok and value.type then result[#result + 1] = value.type end
+      end
+      return result
+    end)()
+  ]])
+  MiniTest.expect.no_equality(before, after)
+  MiniTest.expect.equality(vim.tbl_count(vim.tbl_filter(function(value) return value == "new_session" end, requests)), 1)
+  MiniTest.expect.equality(child.lua_get([[require("pi").is_running()]]), true)
+
+  system.stdout('{"type":"agent_settled"}\n')
+end
+
+local function test_pi_ask_session_reuses_the_current_session()
+  setup_test_env()
+  setup_buffer({ "code" }, "/test/file.lua")
+
+  local system = run_pi_ask("first")
+  system.stdout('{"type":"agent_settled"}\n')
+  local before = child.lua_get([[require("pi.rpc").get_state().sessionFile]])
+
+  child.lua([[vim.ui.input = function(_, callback) callback("follow-up") end]])
+  child.cmd("PiAskSession")
+  flush()
+
+  local after = child.lua_get([[require("pi.rpc").get_state().sessionFile]])
+  MiniTest.expect.equality(before, after)
+  MiniTest.expect.equality(child.lua_get([[require("pi").is_running()]]), true)
+  system.stdout('{"type":"agent_settled"}\n')
 end
 
 local function test_skills_option_disables_skills()
@@ -557,8 +667,7 @@ local function test_success_overwrites_modified_buffer_with_disk_edits()
 
   local system = run_pi_ask("finish")
   write_file(file, { "updated on disk" })
-  system.stdout('{"type":"agent_end"}\n')
-  system.exit(0, 0)
+  system.stdout('{"type":"agent_settled"}\n')
 
   MiniTest.expect.equality(child.lua_get([[vim.bo.modified]]), false)
   local lines = child.lua_get([[vim.api.nvim_buf_get_lines(0, 0, -1, false)]])
@@ -581,8 +690,7 @@ local function test_success_reloads_all_changed_loaded_buffers()
   local system = run_pi_ask("finish")
   write_file(file_one, { "one after agent edit" })
   write_file(file_two, { "two after agent edit" })
-  system.stdout('{"type":"agent_end"}\n')
-  system.exit(0, 0)
+  system.stdout('{"type":"agent_settled"}\n')
 
   local buffers = child.lua_get([[{
     one = vim.api.nvim_buf_get_lines(vim.fn.bufnr(...), 0, -1, false),
@@ -605,8 +713,7 @@ local function test_success_reloads_unmodified_buffer()
 
   local system = run_pi_ask("finish")
   write_file(file, { "updated on disk" })
-  system.stdout('{"type":"agent_end"}\n')
-  system.exit(0, 0)
+  system.stdout('{"type":"agent_settled"}\n')
 
   local lines = child.lua_get([[vim.api.nvim_buf_get_lines(0, 0, -1, false)]])
   MiniTest.expect.equality(lines[1], "updated on disk")
@@ -621,8 +728,7 @@ local function test_reloaded_buffer_can_be_written_without_changed_since_reading
 
   local system = run_pi_ask("finish")
   write_file(file, { "after agent edit" })
-  system.stdout('{"type":"agent_end"}\n')
-  system.exit(0, 0)
+  system.stdout('{"type":"agent_settled"}\n')
 
   child.lua([[_G.__pi_test_notifications = {}]])
   child.lua([[vim.api.nvim_buf_set_lines(0, 0, -1, false, { "after local write" })]])
@@ -697,8 +803,7 @@ local function test_run_calls_on_done_before_success()
       end,
     })
   ]])
-  system.stdout('{"type":"agent_end"}\n')
-  system.exit(0, 0)
+  system.stdout('{"type":"agent_settled"}\n')
 
   MiniTest.expect.equality(child.lua_get([[_G.__pi_test_on_done_called]]), true)
   MiniTest.expect.equality(child.lua_get([[_G.__pi_test_on_done_session]]), "done")
@@ -718,8 +823,7 @@ local function test_run_on_done_error_still_finishes_success()
       end,
     })
   ]])
-  system.stdout('{"type":"agent_end"}\n')
-  system.exit(0, 0)
+  system.stdout('{"type":"agent_settled"}\n')
 
   MiniTest.expect.equality(child.lua_get([[require("pi").is_running()]]), false)
   MiniTest.expect.equality(child.lua_get([[require("pi")._get_last_session().status]]), "done")
@@ -744,8 +848,7 @@ local function test_run_skip_reload_prevents_buffer_reload()
     })
   ]])
   write_file(file, { "updated on disk" })
-  system.stdout('{"type":"agent_end"}\n')
-  system.exit(0, 0)
+  system.stdout('{"type":"agent_settled"}\n')
 
   MiniTest.expect.equality(child.lua_get([[vim.bo.modified]]), true)
   local lines = child.lua_get([[vim.api.nvim_buf_get_lines(0, 0, -1, false)]])
@@ -836,6 +939,8 @@ T["PiAsk"]["uses context around cursor"] = test_pi_ask_uses_context_around_curso
 T["PiAsk"]["includes all diagnostics when enabled"] = test_pi_ask_includes_all_diagnostics_when_enabled
 T["PiAsk"]["does not include diagnostics by default"] = test_pi_ask_does_not_include_diagnostics_by_default
 T["PiAsk"]["blocks second request while running"] = test_second_request_is_blocked_while_running
+T["PiAsk"]["starts a new session after settlement"] = test_pi_ask_starts_a_new_session_after_settlement
+T["PiAsk"]["reuses the current session explicitly"] = test_pi_ask_session_reuses_the_current_session
 T["PiAsk"]["overwrites modified buffer with disk edits on success"] = test_success_overwrites_modified_buffer_with_disk_edits
 T["PiAsk"]["reloads unmodified buffer on success"] = test_success_reloads_unmodified_buffer
 T["PiAsk"]["reloaded buffer can be written without changed-since-reading warning"] = test_reloaded_buffer_can_be_written_without_changed_since_reading_warning
