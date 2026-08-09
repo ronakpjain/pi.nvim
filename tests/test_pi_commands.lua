@@ -536,6 +536,19 @@ local function test_transcript_closes_when_origin_buffer_is_deleted()
   MiniTest.expect.equality(child.lua_get([[vim.fn.bufwinnr("pi://transcript")]]), -1)
 end
 
+local function test_transcript_closes_when_origin_window_is_closed()
+  setup_test_env()
+
+  child.lua([[
+    local pi = require("pi")
+    pi.open()
+    local origin_window = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_close(origin_window, false)
+  ]])
+
+  MiniTest.expect.equality(child.lua_get([[vim.fn.bufwinnr("pi://transcript")]]), -1)
+end
+
 local function test_agent_settled_clears_rpc_busy_state()
   setup_test_env()
   setup_buffer({ "code" }, "/test/file.lua")
@@ -1028,6 +1041,7 @@ T["Session"] = MiniTest.new_set()
 T["Session"]["handles chunked stdout and notifies on success"] = test_chunked_stdout_updates_and_success_notifies_done
 T["Session"]["reopens the transcript after close"] = test_transcript_reopens_after_close
 T["Session"]["closes with its origin buffer"] = test_transcript_closes_when_origin_buffer_is_deleted
+T["Session"]["closes with its origin window"] = test_transcript_closes_when_origin_window_is_closed
 T["Session"]["settled event clears RPC busy state"] = test_agent_settled_clears_rpc_busy_state
 T["Session"]["idle follow-up uses prompt command"] = test_idle_follow_up_uses_prompt_command
 T["Session"]["notifies and clears UI state on error"] = test_error_notifies_and_clears_ui_state

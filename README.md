@@ -160,7 +160,7 @@ vim.keymap.set("v", "<leader>ai", ":PiAskSelection<CR>", { desc = "Ask pi (selec
 - Runs asynchronously through Pi's JSONL RPC mode and keeps editing nonblocking.
 - Keeps one persistent RPC process per Neovim instance; concurrent turns on that process are rejected.
 - Uses Pi's own session files, so sessions created by the CLI can be resumed in Neovim and vice versa. Do not run two writers against the same session simultaneously.
-- Renders live activity in a dedicated transcript split. The split follows its originating buffer and closes when that buffer is deleted or wiped. Fidget (when configured) can display brief notifications, while detailed output stays in the transcript.
+- Renders live activity in a dedicated transcript split. The split follows its originating buffer/window and closes when that buffer is deleted/wiped or its window is closed. Fidget (when configured) can display brief notifications, while detailed output stays in the transcript.
 - Reloads changed loaded buffers on successful settlement so Pi's on-disk edits are reflected in Neovim.
 - Treats sent buffer/selection context as newer than disk, so unsaved Neovim changes are the source of truth for the agent.
 - Optionally includes Neovim diagnostics from LSPs/linters via `vim.diagnostic`.

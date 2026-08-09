@@ -13,6 +13,7 @@ local state = {
   tokens = nil,
   streamed_message = false,
   origin_bufnr = nil,
+  origin_winnr = nil,
   lifecycle_group = nil,
 }
 
@@ -45,6 +46,17 @@ local function close_for_origin(bufnr)
     return
   end
   state.origin_bufnr = nil
+  state.origin_winnr = nil
+  detach_lifecycle()
+  M.close()
+end
+
+local function close_for_origin_window(match)
+  if tostring(state.origin_winnr) ~= tostring(match) then
+    return
+  end
+  state.origin_bufnr = nil
+  state.origin_winnr = nil
   detach_lifecycle()
   M.close()
 end
@@ -57,6 +69,12 @@ local function attach_lifecycle(bufnr)
     buffer = bufnr,
     callback = function(args)
       close_for_origin(args.buf)
+    end,
+  })
+  vim.api.nvim_create_autocmd("WinClosed", {
+    group = state.lifecycle_group,
+    callback = function(args)
+      close_for_origin_window(args.match)
     end,
   })
 end
@@ -229,6 +247,7 @@ function M.open()
 
   local origin_window = vim.api.nvim_get_current_win()
   state.origin_bufnr = vim.api.nvim_win_get_buf(origin_window)
+  state.origin_winnr = origin_window
   attach_lifecycle(state.origin_bufnr)
   vim.cmd("botright vsplit")
   state.winnr = vim.api.nvim_get_current_win()
