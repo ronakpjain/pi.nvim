@@ -12,6 +12,8 @@ local state = {
   cost = nil,
   tokens = nil,
   streamed_message = false,
+  origin_bufnr = nil,
+  lifecycle_group = nil,
 }
 
 local function valid_buffer()
@@ -29,6 +31,34 @@ local function mutate(callback)
   vim.bo[state.bufnr].modifiable = true
   callback()
   vim.bo[state.bufnr].modifiable = false
+end
+
+local function detach_lifecycle()
+  if state.lifecycle_group then
+    pcall(vim.api.nvim_clear_autocmds, { group = state.lifecycle_group })
+    state.lifecycle_group = nil
+  end
+end
+
+local function close_for_origin(bufnr)
+  if state.origin_bufnr ~= bufnr then
+    return
+  end
+  state.origin_bufnr = nil
+  detach_lifecycle()
+  M.close()
+end
+
+local function attach_lifecycle(bufnr)
+  detach_lifecycle()
+  state.lifecycle_group = vim.api.nvim_create_augroup("PiNvimTranscriptLifecycle", { clear = true })
+  vim.api.nvim_create_autocmd({ "BufDelete", "BufWipeout" }, {
+    group = state.lifecycle_group,
+    buffer = bufnr,
+    callback = function(args)
+      close_for_origin(args.buf)
+    end,
+  })
 end
 
 local function append_lines(lines)
@@ -198,6 +228,8 @@ function M.open()
   end
 
   local origin_window = vim.api.nvim_get_current_win()
+  state.origin_bufnr = vim.api.nvim_win_get_buf(origin_window)
+  attach_lifecycle(state.origin_bufnr)
   vim.cmd("botright vsplit")
   state.winnr = vim.api.nvim_get_current_win()
   if not valid_buffer() then
@@ -233,8 +265,21 @@ function M.focus()
 end
 
 function M.close()
-  if valid_window() then
+  detach_lifecycle()
+  if not valid_window() then
+    return
+  end
+
+  if #vim.api.nvim_list_wins() > 1 then
     vim.api.nvim_win_close(state.winnr, false)
+  else
+    local transcript_buf = state.bufnr
+    local replacement = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_win_set_buf(state.winnr, replacement)
+    if transcript_buf and vim.api.nvim_buf_is_valid(transcript_buf) then
+      pcall(vim.api.nvim_buf_delete, transcript_buf, { force = true })
+    end
+    state.bufnr = nil
   end
   state.winnr = nil
 end
@@ -327,6 +372,9 @@ end
 
 function M.handle_event(event)
   if type(event) ~= "table" then
+    return
+  end
+  if not valid_window() and not state.origin_bufnr then
     return
   end
   M.open()
