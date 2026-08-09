@@ -970,7 +970,8 @@ function M.follow_up()
     end
 
     transcript.append_user(message)
-    rpc.request({ type = "follow_up", message = message }, function(_, err)
+    local command_type = rpc.is_busy() and "follow_up" or "prompt"
+    rpc.request({ type = command_type, message = message }, function(_, err)
       if err and active_session then
         finish_session(active_session, "error", err)
       end
@@ -994,7 +995,8 @@ function M.compact()
     transcript.append({ "↻ Requested context compaction", instructions ~= "" and ("  Instructions: " .. instructions) or "", "" })
     rpc.request({ type = "compact", customInstructions = instructions ~= "" and instructions or nil }, function(_, err)
       if err then
-        notify("Unable to compact Pi session: " .. err, vim.log.levels.ERROR)
+        local level = tostring(err):find("Nothing to compact", 1, true) and vim.log.levels.WARN or vim.log.levels.ERROR
+        notify("Unable to compact Pi session: " .. err, level)
       end
     end)
   end)

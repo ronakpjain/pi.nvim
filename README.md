@@ -142,7 +142,7 @@ vim.keymap.set("v", "<leader>ai", ":PiAskSelection<CR>", { desc = "Ask pi (selec
 | `:PiAskSelection` | Prompt with visual-selection context in a new session |
 | `:PiAskSession` | Prompt in the current/resumed session |
 | `:PiCancel` | Request abort of the active turn; the session remains locked until settled |
-| `:PiSteer` / `:PiFollowUp` | Queue an instruction while Pi is working / after it settles |
+| `:PiSteer` / `:PiFollowUp` | Queue an instruction while Pi is working / send the next prompt after it settles |
 | `:PiCompact` | Compact the current session, optionally with instructions |
 | `:PiSessionNew` | Create a fresh session without prompting |
 | `:PiSessionResume` / `:PiSessionResumeAll` | Pick a JSONL session for the current project / all projects |

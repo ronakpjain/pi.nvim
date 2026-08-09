@@ -69,8 +69,14 @@ local function handle_line(line)
 
   if event.type == "agent_start" or event.type == "turn_start" then
     client.busy = true
-  elseif event.type == "agent_settled" then
+    if client.state then
+      client.state.isStreaming = true
+    end
+  elseif event.type == "agent_end" or event.type == "agent_settled" then
     client.busy = false
+    if client.state then
+      client.state.isStreaming = false
+    end
   end
 
   emit(event)
