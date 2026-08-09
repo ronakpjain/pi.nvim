@@ -513,6 +513,60 @@ local function test_cancel_kills_process_and_closes_immediately()
   MiniTest.expect.equality(child.lua_get([[require("pi")._get_last_session().status]]), "cancelled")
 end
 
+local function test_transcript_reopens_after_close()
+  setup_test_env()
+
+  child.lua([[local pi = require("pi"); pi.open(); pi.close_transcript(); pi.open()]])
+
+  MiniTest.expect.equality(child.lua_get([[vim.fn.bufwinnr("pi://transcript") ~= -1]]), true)
+  MiniTest.expect.no_equality(child.lua_get([[vim.fn.bufnr("pi://transcript")]]), -1)
+end
+
+local function test_agent_settled_clears_rpc_busy_state()
+  setup_test_env()
+  setup_buffer({ "code" }, "/test/file.lua")
+
+  local system = run_pi_ask("busy state")
+  system.stdout('{"type":"agent_start"}\n')
+  MiniTest.expect.equality(child.lua_get([[require("pi.rpc").is_busy()]]), true)
+  system.stdout('{"type":"agent_settled"}\n')
+  MiniTest.expect.equality(child.lua_get([[require("pi.rpc").is_busy()]]), false)
+end
+
+local function test_idle_follow_up_uses_prompt_command()
+  setup_test_env()
+  setup_buffer({ "code" }, "/test/file.lua")
+
+  local system = run_pi_ask("first")
+  system.stdout('{"type":"agent_settled"}\n')
+  child.lua([[vim.ui.input = function(_, callback) callback("follow-up") end]])
+  child.cmd("PiFollowUp")
+  flush()
+
+  local requests = child.lua_get([[
+    (function()
+      local result = {}
+      for line in table.concat(_G.__pi_test_system.writes, ""):gmatch("[^\n]+") do
+        local ok, value = pcall(vim.json.decode, line)
+        if ok and value.type then result[#result + 1] = value end
+      end
+      return result
+    end)()
+  ]])
+  local follow_up_count = 0
+  local follow_prompt_count = 0
+  for _, request in ipairs(requests) do
+    if request.type == "follow_up" then
+      follow_up_count = follow_up_count + 1
+    elseif request.type == "prompt" and request.message == "follow-up" then
+      follow_prompt_count = follow_prompt_count + 1
+    end
+  end
+  MiniTest.expect.equality(follow_up_count, 0)
+  MiniTest.expect.equality(follow_prompt_count, 1)
+  system.stdout('{"type":"agent_settled"}\n')
+end
+
 local function test_pi_ask_starts_a_new_session_after_settlement()
   setup_test_env()
   setup_buffer({ "code" }, "/test/file.lua")
@@ -958,6 +1012,9 @@ T["PiAskSelection"]["includes only overlapping diagnostics when enabled"] = test
 
 T["Session"] = MiniTest.new_set()
 T["Session"]["handles chunked stdout and notifies on success"] = test_chunked_stdout_updates_and_success_notifies_done
+T["Session"]["reopens the transcript after close"] = test_transcript_reopens_after_close
+T["Session"]["settled event clears RPC busy state"] = test_agent_settled_clears_rpc_busy_state
+T["Session"]["idle follow-up uses prompt command"] = test_idle_follow_up_uses_prompt_command
 T["Session"]["notifies and clears UI state on error"] = test_error_notifies_and_clears_ui_state
 T["Session"]["clean exit without terminal event is an error"] = test_clean_exit_without_agent_end_is_an_error
 T["Session"]["turn_end does not finish session (multi-turn tool use)"] = test_turn_end_does_not_finish_session
