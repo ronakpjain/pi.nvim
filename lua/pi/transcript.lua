@@ -162,20 +162,39 @@ local function finish_block()
   append_lines({ "" })
 end
 
+local function heading_text(text)
+  return vim.trim(tostring(text or ""):gsub("[%c\r\n]", " "))
+end
+
+local function markdown_fence(text)
+  local longest = 0
+  for run in tostring(text or ""):gmatch("`+") do
+    longest = math.max(longest, #run)
+  end
+  return string.rep("`", math.max(3, longest + 1))
+end
+
 local function render_active_block()
   local block = state.active_block
   if not block or not valid_buffer() then
     return
   end
 
-  local lines = vim.split(block.text or "", "\n", { plain = true })
-  if #lines == 0 then
-    lines = { "" }
+  local body = content_lines(block.text)
+  local lines = vim.deepcopy(block.header or {})
+  if block.fence_language then
+    local fence = markdown_fence(block.text)
+    lines[#lines + 1] = fence .. block.fence_language
+    vim.list_extend(lines, body)
+    lines[#lines + 1] = fence
+  else
+    body[1] = block.prefix .. body[1]
+    for index = 2, #body do
+      body[index] = block.continuation .. body[index]
+    end
+    vim.list_extend(lines, body)
   end
-  lines[1] = block.prefix .. lines[1]
-  for index = 2, #lines do
-    lines[index] = block.continuation .. lines[index]
-  end
+  vim.list_extend(lines, block.footer or {})
 
   mutate(function()
     vim.api.nvim_buf_set_lines(state.bufnr, block.start, -1, false, lines)
@@ -185,14 +204,18 @@ local function render_active_block()
   end
 end
 
-local function begin_block(kind, prefix, continuation)
+local function begin_block(kind, prefix, continuation, opts)
   finish_block()
+  opts = opts or {}
   local start = vim.api.nvim_buf_line_count(state.bufnr)
   state.active_block = {
     kind = kind,
     start = start,
     prefix = prefix or "",
     continuation = continuation or "  ",
+    header = opts.header or {},
+    footer = opts.footer or {},
+    fence_language = opts.fence_language,
     text = "",
   }
   append_lines({ "" })
@@ -211,15 +234,36 @@ local function update_block(text, append)
   render_active_block()
 end
 
-local function append_labeled(label, content)
+local function append_markdown_block(title, content)
   finish_block()
-  local lines = content_lines(content)
-  lines[1] = label .. lines[1]
-  for index = 2, #lines do
-    lines[index] = "  " .. lines[index]
+  local lines = { "### " .. heading_text(title), "" }
+  vim.list_extend(lines, content_lines(content))
+  append_lines(lines)
+  append_lines({ "" })
+end
+
+local function append_quote_block(title, content)
+  finish_block()
+  local lines = { "> **" .. heading_text(title) .. "**" }
+  for _, line in ipairs(content_lines(content)) do
+    lines[#lines + 1] = line == "" and ">" or ("> " .. line)
   end
   append_lines(lines)
   append_lines({ "" })
+end
+
+local function append_fenced_content(content, language)
+  local text = text_content(content)
+  local fence = markdown_fence(text)
+  local lines = { fence .. (language or "") }
+  vim.list_extend(lines, content_lines(text))
+  lines[#lines + 1] = fence
+  append_lines(lines)
+end
+
+local function append_status(text)
+  finish_block()
+  append_lines({ "> " .. text, "" })
 end
 
 local function partial_result_text(partial)
@@ -262,13 +306,23 @@ function M.open()
   vim.bo[state.bufnr].bufhidden = "hide"
   vim.bo[state.bufnr].swapfile = false
   vim.bo[state.bufnr].modifiable = false
-  vim.bo[state.bufnr].filetype = "markdown"
+  vim.bo[state.bufnr].filetype = "pi"
   vim.bo[state.bufnr].syntax = "markdown"
+  if vim.treesitter.language and vim.treesitter.language.register then
+    pcall(vim.treesitter.language.register, "markdown", "pi")
+  end
+  pcall(vim.treesitter.start, state.bufnr, "markdown")
+  vim.bo[state.bufnr].syntax = "markdown"
+  pcall(function()
+    require("render-markdown").render({ buf = state.bufnr, win = state.winnr })
+  end)
   vim.wo[state.winnr].number = false
   vim.wo[state.winnr].relativenumber = false
   vim.wo[state.winnr].signcolumn = "no"
   vim.wo[state.winnr].wrap = true
   vim.wo[state.winnr].linebreak = true
+  vim.wo[state.winnr].conceallevel = 2
+  vim.wo[state.winnr].foldenable = false
   vim.wo[state.winnr].winfixwidth = true
   M.clear()
   if vim.api.nvim_win_is_valid(origin_window) then
@@ -380,7 +434,7 @@ end
 
 function M.append_user(message)
   M.open()
-  append_labeled("> ", message)
+  append_markdown_block("You", message)
   M.set_status("starting")
 end
 
@@ -404,17 +458,17 @@ function M.handle_event(event)
     return
   elseif event_type == "agent_start" then
     M.set_status("running")
-    append_lines({ "▶ Agent started", "" })
+    append_status("**Agent started**")
     return
   elseif event_type == "agent_settled" then
     finish_block()
     M.set_status("idle")
-    append_lines({ "■ Agent settled", "" })
+    append_status("**Agent settled**")
     return
   elseif event_type == "agent_end" then
     finish_block()
     M.set_status(event.willRetry and "retrying" or "thinking")
-    append_lines({ event.willRetry and "↻ Agent run finished; retrying" or "· Agent turn finished", "" })
+    append_status(event.willRetry and "↻ **Agent run finished; retrying**" or "· **Agent turn finished**")
     return
   elseif event_type == "turn_start" then
     M.set_status("thinking")
@@ -427,19 +481,26 @@ function M.handle_event(event)
     local delta = event.assistantMessageEvent or {}
     local delta_type = delta.type
     if delta_type == "thinking_start" then
-      begin_block("thinking", "[thinking] ")
+      begin_block("thinking", "> ", "> ", {
+        header = { "> **Thinking**" },
+      })
     elseif delta_type == "thinking_delta" then
       update_block(delta.delta or "", true)
     elseif delta_type == "thinking_end" then
       finish_block()
     elseif delta_type == "text_start" then
-      begin_block("assistant", "[assistant] ")
+      begin_block("assistant", "", "", {
+        header = { "### Assistant", "" },
+      })
     elseif delta_type == "text_delta" then
       update_block(delta.delta or "", true)
     elseif delta_type == "text_end" then
       finish_block()
     elseif delta_type == "toolcall_start" then
-      begin_block("tool_call", "[tool call] ")
+      begin_block("tool_call", "", "", {
+        header = { "### Tool call", "" },
+        fence_language = "json",
+      })
     elseif delta_type == "toolcall_delta" then
       update_block(delta.delta or "", true)
     elseif delta_type == "toolcall_end" then
@@ -453,9 +514,9 @@ function M.handle_event(event)
     if event.message and event.message.role == "assistant" and not state.streamed_message then
       for _, block in ipairs(event.message.content or {}) do
         if block.type == "thinking" then
-          append_labeled("[thinking] ", block.thinking)
+          append_quote_block("Thinking", block.thinking)
         elseif block.type == "text" then
-          append_labeled("[assistant] ", block.text)
+          append_markdown_block("Assistant", block.text)
         end
       end
     end
@@ -463,43 +524,57 @@ function M.handle_event(event)
     return
   elseif event_type == "tool_execution_start" then
     finish_block()
-    M.set_status("tool: " .. (event.toolName or "unknown"))
-    append_lines({ string.format("▶ Tool: %s", event.toolName or "unknown"), "  Args: " .. tool_arguments(event.args) })
-    begin_block("tool_output", "  Output: ", "          ")
+    local tool_name = heading_text(event.toolName or "unknown")
+    M.set_status("tool: " .. tool_name)
+    append_lines({ "### Tool: " .. tool_name, "", "**Arguments**", "" })
+    append_fenced_content(tool_arguments(event.args), "json")
+    append_lines({ "", "**Output**", "" })
+    begin_block("tool_output", "", "", {
+      fence_language = "text",
+    })
     return
   elseif event_type == "tool_execution_update" then
     M.set_status("tool: " .. (event.toolName or "unknown"))
+    if not state.active_block or state.active_block.kind ~= "tool_output" then
+      begin_block("tool_output", "", "", { fence_language = "text" })
+    end
     update_block(partial_result_text(event.partialResult), false)
     return
   elseif event_type == "tool_execution_end" then
+    if not state.active_block or state.active_block.kind ~= "tool_output" then
+      begin_block("tool_output", "", "", { fence_language = "text" })
+    end
     update_block(partial_result_text(event.result), false)
     finish_block()
-    append_lines({ event.isError and "  ✗ Tool failed" or "  ✓ Tool finished", "" })
+    append_status(event.isError and "✗ **Tool failed**" or "✓ **Tool finished**")
     M.set_status("thinking")
     return
   elseif event_type == "bash_execution_update" then
     if not state.active_block or state.active_block.kind ~= "bash" then
-      begin_block("bash", "[bash] ", "        ")
+      begin_block("bash", "", "", {
+        header = { "### Bash", "" },
+        fence_language = "text",
+      })
     end
     update_block(event.delta or "", true)
     return
   elseif event_type == "compaction_start" then
     finish_block()
     M.set_status("compacting")
-    append_lines({ "↻ Context compaction started", "" })
+    append_status("↻ **Context compaction started**")
     return
   elseif event_type == "compaction_end" then
     finish_block()
-    append_lines({ "✓ Context compaction finished", "" })
+    append_status("✓ **Context compaction finished**")
     M.set_status("thinking")
     return
   elseif event_type == "auto_retry_start" then
     finish_block()
     M.set_status("retrying")
-    append_lines({ string.format("↻ Retry %s/%s: %s", event.attempt or "?", event.maxAttempts or "?", event.errorMessage or ""), "" })
+    append_status(string.format("↻ **Retry %s/%s:** %s", event.attempt or "?", event.maxAttempts or "?", event.errorMessage or ""))
     return
   elseif event_type == "auto_retry_end" then
-    append_lines({ event.success and "✓ Retry succeeded" or "✗ Retry failed", "" })
+    append_status(event.success and "✓ **Retry succeeded**" or "✗ **Retry failed**")
     M.set_status("thinking")
     return
   elseif event_type == "queue_update" then
@@ -509,29 +584,28 @@ function M.handle_event(event)
     return
   elseif event_type == "extension_ui_request" then
     if event.method == "notify" then
-      append_lines({ string.format("[%s] %s", event.notifyType or "info", event.message or ""), "" })
+      append_status(string.format("**%s:** %s", heading_text(event.notifyType or "info"), event.message or ""))
     elseif event.method == "setStatus" then
       M.set_status(event.statusText or "idle")
     elseif event.method == "setWidget" then
-      append_lines(event.widgetLines or {})
-      append_lines({ "" })
+      append_markdown_block("Widget", table.concat(event.widgetLines or {}, "\n"))
     end
     return
   elseif event_type == "extension_error" then
     finish_block()
     M.set_status("error")
-    append_lines({ "✗ Extension error: " .. (event.error or event.message or "unknown error"), "" })
+    append_status("✗ **Extension error:** " .. (event.error or event.message or "unknown error"))
     return
   elseif event_type == "rpc_error" or event_type == "stderr" then
     local text = event.message or event.text
     if text and text ~= "" then
-      append_lines({ "[rpc] " .. vim.trim(text), "" })
+      append_status("**RPC:** " .. vim.trim(text))
     end
     return
   elseif event_type == "rpc_exit" then
     finish_block()
     M.set_status("disconnected")
-    append_lines({ "■ " .. (event.message or "Pi disconnected"), "" })
+    append_status("■ **" .. (event.message or "Pi disconnected") .. "**")
   end
 end
 
@@ -546,32 +620,36 @@ function M.render_entries(entries, data)
     if entry.type == "message" and entry.message then
       local message = entry.message
       if message.role == "user" then
-        append_labeled("> ", message.content)
+        append_markdown_block("You", message.content)
       elseif message.role == "assistant" then
         for _, block in ipairs(message.content or {}) do
           if block.type == "thinking" then
-            append_labeled("[thinking] ", block.thinking)
+            append_quote_block("Thinking", block.thinking)
           elseif block.type == "text" then
-            append_labeled("[assistant] ", block.text)
+            append_markdown_block("Assistant", block.text)
           elseif block.type == "toolCall" then
-            append_labeled("[tool call] " .. (block.name or "unknown") .. " ", tool_arguments(block.arguments))
+            append_lines({ "### Tool call: " .. heading_text(block.name or "unknown"), "", "**Arguments**", "" })
+            append_fenced_content(tool_arguments(block.arguments), "json")
+            append_lines({ "" })
           end
         end
       elseif message.role == "toolResult" then
-        append_labeled("[tool result] " .. (message.toolName or "unknown") .. " ", message.content)
+        append_lines({ "### Tool result: " .. heading_text(message.toolName or "unknown"), "" })
+        append_fenced_content(message.content, "text")
+        append_lines({ "" })
       end
     elseif entry.type == "compaction" then
-      append_labeled("[compaction] ", entry.summary)
+      append_markdown_block("Compaction", entry.summary)
     elseif entry.type == "branch_summary" then
-      append_labeled("[branch summary] ", entry.summary)
+      append_markdown_block("Branch summary", entry.summary)
     elseif entry.type == "model_change" then
-      append_lines({ string.format("[model] %s/%s", entry.provider or "?", entry.modelId or "?"), "" })
+      append_status(string.format("**Model:** %s/%s", entry.provider or "?", entry.modelId or "?"))
     elseif entry.type == "thinking_level_change" then
-      append_lines({ "[thinking level] " .. (entry.thinkingLevel or "?"), "" })
+      append_status("**Thinking level:** " .. (entry.thinkingLevel or "?"))
     elseif entry.type == "session_info" then
-      append_lines({ "[session name] " .. (entry.name or ""), "" })
+      append_status("**Session name:** " .. (entry.name or ""))
     elseif entry.type == "custom_message" and entry.display then
-      append_labeled("[extension] ", entry.content)
+      append_markdown_block("Extension", entry.content)
     end
   end
 

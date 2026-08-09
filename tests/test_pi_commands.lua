@@ -522,6 +522,28 @@ local function test_transcript_reopens_after_close()
   MiniTest.expect.no_equality(child.lua_get([[vim.fn.bufnr("pi://transcript")]]), -1)
 end
 
+local function test_transcript_keeps_pi_filetype_with_markdown_structure()
+  setup_test_env()
+
+  child.lua([[
+    local transcript = require("pi.transcript")
+    transcript.render_entries({
+      { type = "message", message = { role = "user", content = "## Question\n\n**bold**" } },
+      { type = "message", message = { role = "assistant", content = { { type = "text", text = "# Answer" } } } },
+    })
+  ]])
+
+  local bufnr = child.lua_get([[vim.fn.bufnr("pi://transcript")]])
+  local filetype = child.lua_get([[vim.bo[...].filetype]], { bufnr })
+  local syntax = child.lua_get([[vim.bo[...].syntax]], { bufnr })
+  local lines = child.lua_get([[vim.api.nvim_buf_get_lines(..., 0, -1, false)]], { bufnr })
+  MiniTest.expect.equality(filetype, "pi")
+  MiniTest.expect.equality(syntax, "markdown")
+  MiniTest.expect.equality(lines[3], "### You")
+  MiniTest.expect.equality(lines[5], "## Question")
+  MiniTest.expect.equality(lines[9], "### Assistant")
+end
+
 local function test_transcript_closes_when_origin_buffer_is_deleted()
   setup_test_env()
 
@@ -1040,6 +1062,7 @@ T["PiAskSelection"]["includes only overlapping diagnostics when enabled"] = test
 T["Session"] = MiniTest.new_set()
 T["Session"]["handles chunked stdout and notifies on success"] = test_chunked_stdout_updates_and_success_notifies_done
 T["Session"]["reopens the transcript after close"] = test_transcript_reopens_after_close
+T["Session"]["keeps Pi identity with Markdown structure"] = test_transcript_keeps_pi_filetype_with_markdown_structure
 T["Session"]["closes with its origin buffer"] = test_transcript_closes_when_origin_buffer_is_deleted
 T["Session"]["closes with its origin window"] = test_transcript_closes_when_origin_window_is_closed
 T["Session"]["settled event clears RPC busy state"] = test_agent_settled_clears_rpc_busy_state

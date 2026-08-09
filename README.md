@@ -16,7 +16,7 @@ It's funny that all AI plugins for Neovim are quite complex to interact with, li
 - **Unsaved-buffer aware**: Tells pi to treat the sent Neovim buffer content as the source of truth, even if the on-disk file is stale.
 - **Simple configuration**: Set your preferred AI model and thinking level.
 - **Persistent RPC sessions**: Pi sessions are stored in Pi's JSONL format and can be resumed from Neovim or the CLI.
-- **Live transcript**: A dedicated split renders thinking, assistant text, tool calls/output, retries, compaction, and usage state.
+- **Live transcript**: A dedicated `pi` split renders thinking, assistant text, tool calls/output, retries, compaction, and usage state with Markdown-style sections and fenced code blocks.
 - **CLI-compatible controls**: Abort, steer, follow up, compact, fork, clone, tree, stats, and HTML export are exposed as Neovim commands.
 
 ## Requirements
@@ -24,6 +24,8 @@ It's funny that all AI plugins for Neovim are quite complex to interact with, li
 - [Neovim](https://neovim.io/) 0.10+
 - [pi](https://github.com/badlogic/pi-mono) installed globally: `curl -fsSL https://pi.dev/install.sh | sh`
 - Your preferred models availble in pi: `pi --list-models`
+
+For enhanced transcript rendering, optionally install [render-markdown.nvim](https://github.com/MeanderingProgrammer/render-markdown.nvim) and add `"pi"` to its `file_types` configuration. The transcript remains `filetype=pi`; it only uses Markdown syntax and the Markdown Tree-sitter parser internally.
 
 ## Installation
 
@@ -160,7 +162,7 @@ vim.keymap.set("v", "<leader>ai", ":PiAskSelection<CR>", { desc = "Ask pi (selec
 - Runs asynchronously through Pi's JSONL RPC mode and keeps editing nonblocking.
 - Keeps one persistent RPC process per Neovim instance; concurrent turns on that process are rejected.
 - Uses Pi's own session files, so sessions created by the CLI can be resumed in Neovim and vice versa. Do not run two writers against the same session simultaneously.
-- Renders live activity in a dedicated transcript split. The split follows its originating buffer/window and closes when that buffer is deleted/wiped or its window is closed. Fidget (when configured) can display brief notifications, while detailed output stays in the transcript.
+- Renders live activity in a dedicated `pi` transcript split. It keeps Markdown syntax internally without becoming an editable Markdown file; with `render-markdown.nvim`, headings, lists, inline formatting, quotes, and code fences are rendered like normal Neovim Markdown. The split follows its originating buffer/window and closes when that buffer is deleted/wiped or its window is closed. Fidget (when configured) can display brief notifications, while detailed output stays in the transcript.
 - Reloads changed loaded buffers on successful settlement so Pi's on-disk edits are reflected in Neovim.
 - Treats sent buffer/selection context as newer than disk, so unsaved Neovim changes are the source of truth for the agent.
 - Optionally includes Neovim diagnostics from LSPs/linters via `vim.diagnostic`.
